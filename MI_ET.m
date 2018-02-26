@@ -276,7 +276,7 @@ classdef MI_ET
             end
             
             % Recover bandpower data from data buffer
-            BP=MI_ET.preprocessData(dataWindow*obj.clsfr.lapFltrWeights);
+            BP=MI_ET.preprocessData(dataWindow*obj.clsfr.lapFltrWeights,obj.fs);
             
             % If only a subset of feature has been chosen, remove the rest
             if isfield(obj.clsfr,'featsIdx')
@@ -528,25 +528,16 @@ classdef MI_ET
         end
         
         function [obj,feats,lbls]=performFeatureSelection(obj)
-            %             % Recover MI data
-            %             relevantData=obj.outputLog.isTraining&obj.outputLog.isInTarget;
-            %             allFeats=obj.outputLog.feats(relevantData,:);
-            %             lbls=obj.outputLog.actualTargetType(relevantData);
-            winStarts=obj.outputLog.time*obj.fs;
-            winEnds=winStarts+round(0.4*obj.fs);
             lapData=MI_ET.applyLapFilter(obj.rawData.data);
             relevantData=obj.outputLog.isTraining&obj.outputLog.isInTarget;
-            winStarts(winEnds>length(lapData))=[];
-            relevantData(winEnds>length(lapData))=[];
-            winEnds(winEnds>length(lapData))=[];
-            dataWins=zeros(length(winStarts),round(0.4*obj.fs),size(lapData,2));
-            for currWin=1:length(winStarts)
-                dataWins(currWin,:,:)=lapData(winStarts(currWin)+1:winEnds(currWin),:);
-            end
-            allFeats=MI_ET.preprocessData(dataWins);
+            allFeats=MI_ET.preprocessData(lapData,obj.fs);
             allFeats=allFeats(relevantData,:);
-            lbls=interp1(obj.outputLog.time,obj.outputLog.actualTargetType,(winStarts+winEnds)*.5/obj.fs,'nearest','extrap');
-            lbls=lbls(relevantData);
+            lbls=obj.outputLog.actualTargetType(relevantData);
+            
+            % Drop first section of recording (affected by stabilization
+            % artifact)
+            allFeats=allFeats(501:end,:);
+            lbls=lbls(501:end);
             
             % Make a first selection of relevant features
             classLbls=unique(lbls);
@@ -564,7 +555,7 @@ classdef MI_ET
             % Keep features with a worth greater than 0.3 (keep at least
             % 15)
             [sortedWorth,featOrdr]=sort(featWorth,'descend');
-            goodFeatsNumber=sum(sortedWorth>.2);
+            goodFeatsNumber=sum(sortedWorth>.3);
             goodFeatsIdx=featOrdr(1:max(15,goodFeatsNumber));
             feats=allFeats(:,goodFeatsIdx);
             obj.clsfr.featsIdx=goodFeatsIdx;
@@ -580,60 +571,18 @@ classdef MI_ET
         end        
     end
     methods (Static)
-        function [freqFeats,timeFeats]=preprocessData(dataWins)
-            % This function takes either one time window as input (during
-            % testing) or a vector of them (during training). Reshape
-            % single window to make it consistent
-            persistent filterData
-            if ~isfield(filterData,'B')
-                filterData.filterOrder=4;
-                [filterData.B,filterData.A]=cheby1(filterData.filterOrder,6,(.2/8)/2); %Assuming here that windows are taken at 8Hz and implementing a 0.2Hz lowpass filter
+        function freqFeats=preprocessData(inData,fs)
+            % This function takes input data and computes spectrogram on
+            % them using wavelets
+            freqFeats=[];
+            tic;
+            for currCh=1:size(inData,2)
+                wpt=wpdec(inData(:,currCh),6,'sym8');
+                [Spec,~,Freq]=wpspectrum(wpt,fs);
+                freqFeats=cat(1,freqFeats,Spec(Freq<=60,:));
             end
-            
-            if length(size(dataWins))==2
-                dataWins=reshape(dataWins,1,size(dataWins,1),size(dataWins,2));
-            end
-            [nWins,~,nChannels]=size(dataWins);
-            timeFeats=zeros(size(dataWins));
-            freqFeats=zeros(nWins,129,nChannels);
-            % Preprocess each input window
-            for currWin=1:nWins
-                for currCh=1:nChannels
-                    relData=squeeze(dataWins(currWin,:,currCh));
-                    % Normalize: set first sample to zero, sd to 1
-                    relData=(relData-relData(1))/std(relData);
-                    % Remove linear trend
-                    relData=detrend(relData);
-                    timeFeats(currWin,:,currCh)=relData;
-                    % Compute log of bandpower
-                    freqFeats(currWin,:,currCh)=pyulear(relData.*blackman(length(relData))',16);
-                end                
-            end
-            
-            % Consider only frequencies up to ~60Hz
-            freqFeats(:,31:end,:)=[];
-            
-            % Normalize, then extract logs
-            freqFeats=freqFeats./repmat(sum(freqFeats,3),1,1,size(freqFeats,3));
-            freqFeats=log(freqFeats);
-            
-            % Reshape data
-            freqFeats=reshape(freqFeats,size(freqFeats,1),[]);
-            
-%             % Lowpass data
-%             if size(dataWins,1)>1
-%                 freqFeats=filter(filterData.B,filterData.A,freqFeats);
-%             else
-%                 if ~isfield(filterData,'X')
-%                     filterData.X=zeros(filterData.filterOrder+1,size(freqFeats,2));
-%                     filterData.Y=zeros(filterData.filterOrder,size(freqFeats,2));
-%                 end
-%                 filterData.X=[freqFeats;filterData.X];
-%                 filterData.X(end,:)=[];
-%                 freqFeats=filterData.B*filterData.X-filterData.A(2:end)*filterData.Y;
-%                 filterData.Y=[freqFeats;filterData.Y];
-%                 filterData.Y(end,:)=[];
-%             end
+            freqFeats=log(freqFeats)';
+            toc
         end
         
         function [outData,fltrWeights]=applyLapFilter(inData)
